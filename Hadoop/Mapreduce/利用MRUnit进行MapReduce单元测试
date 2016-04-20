@@ -1,0 +1,293 @@
+## 利用MRUnit进行MapReduce单元测试
+
+---
+
+### 一、MRUnit简介  
+
+    官网地址：https://mrunit.apache.org/  
+    Apache MRUnit ™ is a Java library that helps developers unit test Apache Hadoop map reduce jobs.  
+    MRUnit是一个帮助开发者测试map reduce 作业的单元测试库。   
+
+### 二、代码示例  
+
+    以maven项目为例，演示如何使用MRUnit进行MR单元测试。  
+    关于示例的讲解，请参考：https://cwiki.apache.org/confluence/display/MRUNIT/MRUnit+Tutorial  
+    项目pom.xml文件，重点关注mrunit，mockito-all, junit三个类库的引入，MRUnit是利用mockito+junit针对MR程序进行模拟测试  
+
+####　Mapper类
+
+```java
+package com.hh.datascience.mrunit;
+
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+ 
+public class MRUnitTestMapper extends Mapper<LongWritable, Text, Text, IntWritable> {
+      
+      private Text status = new Text();
+      private final static IntWritable addOne = new IntWritable(1);
+       
+      static enum CDRCounter {
+            NonSMSCDR;
+        };
+      
+      /**
+       * Returns the SMS status code and its count
+       */
+      protected void map(LongWritable key, Text value, Context context)
+          throws java.io.IOException, InterruptedException {
+      
+        //655209;1;796764372490213;804422938115889;6 is the Sample record format
+        String[] line = value.toString().split(";");
+        // If record is of SMS CDR
+        if (Integer.parseInt(line[1]) == 1) {
+          status.set(line[4]);
+          context.write(status, addOne);
+        }else{
+            // CDR record is not of type SMS so increment the counter
+            context.getCounter(CDRCounter.NonSMSCDR).increment(1);
+        }
+      }
+    }
+
+```
+
+#### Reducer类
+```java
+package com.hh.datascience.mrunit;
+
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Reducer;
+ 
+public class MRUnitTestReducer extends
+  Reducer<Text, IntWritable, Text, IntWritable> {
+  
+  protected void reduce(Text key, Iterable<IntWritable> values, Context context) throws java.io.IOException, InterruptedException {
+    int sum = 0;
+    for (IntWritable value : values) {
+      sum += value.get();
+    }
+    context.write(key, new IntWritable(sum));
+  }
+}
+
+```
+
+#### MR单元测试类  
+```java
+package com.hh.datascience.mrunit;
+
+import static org.junit.Assert.assertEquals;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+ 
+//import mrunit.SMSCDRMapper.CDRCounter;
+ 
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mrunit.mapreduce.MapDriver;
+import org.apache.hadoop.mrunit.mapreduce.MapReduceDriver;
+import org.apache.hadoop.mrunit.mapreduce.ReduceDriver;
+import org.junit.Before;
+import org.junit.Test;
+
+import com.hh.datascience.mrunit.MRUnitTestMapper.CDRCounter;
+ 
+/**
+ * 测试数据说明 CDRID;CDRType;Phone1;Phone2;SMS Status Code
+ * 655209;1;796764372490213;804422938115889;6
+ * 353415;0;356857119806206;287572231184798;4
+ * 835699;1;252280313968413;889717902341635;0
+ * 
+ */
+public class MRUnitTestMapperReducerTest {
+    Configuration conf = new Configuration();
+    MapDriver<LongWritable, Text, Text, IntWritable> mapDriver;
+    ReduceDriver<Text, IntWritable, Text, IntWritable> reduceDriver;
+    MapReduceDriver<LongWritable, Text, Text, IntWritable, Text, IntWritable> mapReduceDriver;
+ 
+    @Before
+    public void setUp() {
+ 
+        //测试mapreduce
+        MRUnitTestMapper mapper = new MRUnitTestMapper();
+        MRUnitTestReducer reducer = new MRUnitTestReducer();
+        mapDriver = MapDriver.newMapDriver(mapper);
+        reduceDriver = ReduceDriver.newReduceDriver(reducer);
+        mapReduceDriver = MapReduceDriver.newMapReduceDriver(mapper, reducer);
+         
+        //测试配置参数
+        mapDriver.setConfiguration(conf);
+        conf.set("myParameter1", "20");
+        conf.set("myParameter2", "23");
+         
+    }
+ 
+    @Test
+    public void testMapper() throws IOException {
+        mapDriver.withInput(new LongWritable(), new Text(
+                "655209;1;796764372490213;804422938115889;6"));
+        mapDriver.withOutput(new Text("6"), new IntWritable(1));
+        mapDriver.runTest();
+    }
+ 
+    @Test
+    public void testReducer() throws IOException {
+        List<IntWritable> values = new ArrayList<IntWritable>();
+        values.add(new IntWritable(1));
+        values.add(new IntWritable(1));
+        values.add(new IntWritable(1));
+        reduceDriver.withInput(new Text("6"), values);
+        reduceDriver.withOutput(new Text("6"), new IntWritable(3));
+        reduceDriver.runTest();
+        
+    }
+     
+    @Test
+    public void testMapperReducer() throws IOException {
+        mapReduceDriver.withInput(new LongWritable(), new Text(
+                "655209;1;796764372490213;804422938115889;6"));
+        mapReduceDriver.withInput(new LongWritable(), new Text(
+                "655209;1;796764372490213;804422938115889;6"));
+        mapReduceDriver.withOutput(new Text("6"), new IntWritable(2));
+        mapReduceDriver.runTest();
+    }
+ 
+    @Test
+    public void testMapperCount() throws IOException {
+        mapDriver.withInput(new LongWritable(), new Text(
+                "655209;0;796764372490213;804422938115889;6"));
+        // mapDriver.withOutput(new Text("6"), new IntWritable(1));
+        mapDriver.runTest();
+        assertEquals("Expected 1 counter increment", 1, mapDriver.getCounters()
+                .findCounter(CDRCounter.NonSMSCDR).getValue());
+    }
+}
+
+````
+
+#### 项目的pom.xml文件  
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.hh</groupId>
+	<artifactId>HadoopDemos</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<packaging>jar</packaging>
+
+	<name>Analyzer</name>
+	<url>http://maven.apache.org</url>
+
+	<properties>
+		<!-- hadoop.version>2.0.0-mr1-cdh4.4.0</hadoop.version -->
+		<!-- hbase.version>0.94.6-cdh4.4.0</hbase.version -->
+		<project.build.sourceEncoding>utf-8</project.build.sourceEncoding>
+		<maven.compiler.encoding>utf-8</maven.compiler.encoding>
+	</properties>
+
+	<!-- CDH repo -->
+	<repositories>
+		<repository>
+			<id>cloudera</id>
+			<url>https://repository.cloudera.com/artifactory/cloudera-repos/</url>
+		</repository>
+	</repositories>
+
+	<dependencies>
+
+		<!-- CDH dependencies -->
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-common</artifactId>
+			<version>2.5.0-cdh5.2.0</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-mapreduce-client-core</artifactId>
+			<version>2.5.0-cdh5.2.0</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>jdk.tools</groupId>
+			<artifactId>jdk.tools</artifactId>
+			<version>1.7</version>
+			<scope>system</scope>
+			<systemPath>${JAVA_HOME}/lib/tools.jar</systemPath>
+			<!-- <systemPath>E:/Program Files/jdk1.7.0_79/lib/tools.jar</systemPath> -->
+		</dependency>
+
+		<!-- Testing dependencies -->
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<version>4.12</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.mrunit</groupId>
+			<artifactId>mrunit</artifactId>
+			<version>1.1.0</version>
+			<classifier>hadoop2</classifier>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.mockito</groupId>
+			<artifactId>mockito-all</artifactId>
+			<version>1.9.5</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.google.guava</groupId>
+			<artifactId>guava</artifactId>
+			<version>r05</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>commons-collections</groupId>
+			<artifactId>commons-collections</artifactId>
+			<version>3.2.1</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<!--ssh connect -->
+		<extensions>
+			<extension>
+				<groupId>org.apache.maven.wagon</groupId>
+				<artifactId>wagon-ssh</artifactId>
+				<version>2.8</version>
+			</extension>
+		</extensions>
+		<!--ssh connect -->
+		<plugins>
+			<!-- set compiler jdk version -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.1</version>
+				<configuration>
+					<source>1.7</source>
+					<target>1.7</target>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>
+
+```
